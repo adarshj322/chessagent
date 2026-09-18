@@ -3,6 +3,9 @@ const MODELS_URL = 'https://openrouter.ai/api/v1/models';
 
 export const KEY_STORE = 'sma.openrouter.key';
 export const MODEL_STORE = 'sma.openrouter.model';
+export const EFFORT_STORE = 'sma.openrouter.effort';
+
+export type ReasoningEffort = '' | 'low' | 'medium' | 'high' | 'xhigh';
 
 export function loadKey(): string {
   return localStorage.getItem(KEY_STORE) ?? '';
@@ -25,8 +28,24 @@ export async function explainStream(
   model: string,
   system: string,
   user: string,
-  onToken: (t: string) => void
+  onToken: (t: string) => void,
+  opts: { effort?: ReasoningEffort } = {}
 ): Promise<void> {
+  // OpenRouter normalizes reasoning controls across providers:
+  // https://openrouter.ai/docs/use-cases/reasoning-tokens
+  // Models that don't support `effort` simply ignore it.
+  // NOTE: we only stream delta.content, so hidden chain-of-thought never
+  // leaks into the explanation — you pay reasoning tokens, not reading time.
+  const body: Record<string, unknown> = {
+    model,
+    stream: true,
+    temperature: 0.2,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ]
+  };
+  if (opts.effort) body.reasoning = { effort: opts.effort };
   const res = await fetch(OPENROUTER_URL, {
     method: 'POST',
     headers: {
@@ -35,18 +54,11 @@ export async function explainStream(
       'HTTP-Referer': window.location.origin,
       'X-Title': 'Stockfish Move Analyzer'
     },
-    body: JSON.stringify({
-      model,
-      stream: true,
-      temperature: 0.2,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user }
-      ]
-    })
+    body: JSON.stringify(body)
   });
   if (!res.ok) {
     if (res.status === 401) throw new Error('Invalid OpenRouter API key (401).');
+    if (res.status === 402) throw new Error('Insufficient OpenRouter credits (402). Top up at openrouter.ai.');
     if (res.status === 429) throw new Error('Rate limited (429). Try again or pick another model.');
     throw new Error(`OpenRouter request failed (${res.status}).`);
   }

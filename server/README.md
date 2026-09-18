@@ -1,10 +1,18 @@
-# Stockfish server — single-position analysis API
+# Stockfish server — analysis API + deterministic "why"
 
-No LLM keys here. The browser calls OpenRouter directly (BYOK).
+No LLM keys here. The browser calls OpenRouter directly (BYOK). This service runs
+Stockfish and computes **verifiable board facts** (`tactics.py`) that the LLM is only
+allowed to rephrase.
+
+## Files
+
+- `app.py` — routes, lifespan (engine pool warmup/shutdown), rate limit, request IDs.
+- `engine.py` — persistent UCI pool, full-PV extraction (SAN+UCI, 8 plies), win%, TTL-LRU cache.
+- `tactics.py` — deterministic explainer: mate/check/capture/material/tactics/threats/alternatives.
+- `prompt.py` / `verify.py` — grounded prompt builders + 3-tier SAN verification (mirrored in frontend).
+- `settings.py` — env-driven config. `schemas.py` — Pydantic models.
 
 ## Setup (Python 3.11 or 3.12 recommended)
-
-Pydantic/FastAPI wheels may not exist yet for Python 3.14, so prefer 3.11/3.12.
 
 ```bash
 cd server
@@ -22,29 +30,23 @@ sudo apt-get install -y stockfish
 brew install stockfish
 ```
 
-## Run
+## Run (from repo root)
 
 ```bash
 uvicorn server.app:app --reload --port 8000
 # health: GET http://localhost:8000/api/health
 ```
 
-## API
+## Env
 
-`POST /api/analyze` — `{fen, depth (1-28, default 22), multipv (1-5, default 3)}`
-
-Returns best move, eval (cp or mate), depth reached, PV lines, nodes/nps.
-Responses are cached in-memory by `fen+depth+multipv` (LRU 256).
-
-Errors: `400` bad FEN, `503` engine missing/timeout, `500` engine error.
+See `.env.example`: `STOCKFISH_PATH`, `ENGINE_MAX_CONCURRENT`, `ENGINE_TIMEOUT_S`,
+`ENGINE_CACHE_SIZE/TTL_S`, `ENGINE_THREADS`, `ENGINE_HASH_MB`, `CORS_ORIGINS`, `RATE_LIMIT_PER_MIN`.
 
 ## Tests
 
-`test_app.py` covers prompt grounding + SAN verification + API validation.
-The prompt/verify subset runs without a Stockfish binary or FastAPI:
-
 ```bash
-python3 -c "import sys; sys.path.insert(0,'.'); from server.verify import verify_explanation; print(verify_explanation('Nf3 wins', 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1', ['Nf3']))"
+python -m pytest server/test_app.py -v
 ```
 
-Full suite needs FastAPI + pytest: `python -m pytest server/test_app.py -v`.
+Covers prompt grounding, 3-tier verification, deterministic tactics (mate + positional cases),
+and API validation — all without a Stockfish binary.
