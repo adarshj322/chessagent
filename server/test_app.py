@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from .app import app
 from .prompt import build_system_prompt, build_user_prompt
+from .prompt import build_chat_system_prompt, build_followup_reminder, build_correction_prompt
 from .tactics import analyze_move, build_why
 from .verify import extract_san_tokens, verify_explanation
 
@@ -145,3 +146,19 @@ def test_build_why_startpos_center():
     assert why["eval_str"] == "+0.30"
     assert "d4" in why["alternatives"][0]["san"]
     assert "0.20" in why["alternatives"][0]["why"]
+
+
+def test_chat_system_prompt_adds_followup_rules():
+    sys = build_chat_system_prompt(1200)
+    assert "Only discuss moves" in sys  # base grounding retained
+    assert "FOLLOW-UP RULES" in sys
+
+
+def test_followup_reminder_pins_engine_moves():
+    r = build_followup_reminder(["Qxf7#", "Kxf7"], "Qxf7# mates on the spot.")
+    assert "Qxf7#" in r and "Kxf7" in r and "mates on the spot" in r
+
+
+def test_correction_prompt_names_bad_moves():
+    c = build_correction_prompt(["Qh8"], ["Qxf7#"])
+    assert "Qh8" in c and "Qxf7#" in c

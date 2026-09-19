@@ -99,3 +99,33 @@ def build_user_prompt(
         f"Student rating: ~{rating}\n"
         "Explain the best move (PV1) vs PV2/PV3, following VERIFIED_FACTS."
     )
+
+
+def build_chat_system_prompt(rating: int = 1200) -> str:
+    """System prompt for follow-up chat: same grounding, plus multi-turn rules."""
+    return (
+        build_system_prompt(rating)
+        + "\nFOLLOW-UP RULES:\n"
+        + "6. This is a continuing conversation about ONE position. Every reply must still obey rules 1-4.\n"
+        + "7. If asked about a different position or general theory, answer briefly (max 3 sentences) and steer back to this position.\n"
+        + "8. Never carry a move mentioned by the student into your answer as if the engine recommended it — only ENGINE_PVS moves count."
+    )
+
+
+def build_followup_reminder(pv_sans: list[str], verdict: str) -> str:
+    """Short grounding nudge appended to every follow-up question."""
+    moves = ", ".join(pv_sans) if pv_sans else "(none)"
+    return (
+        "\n[Grounding reminder — still true for this position. "
+        f"Verdict: {verdict} Moves you may cite: {moves}. Only cite these.]"
+    )
+
+
+def build_correction_prompt(bad_moves: list[str], pv_sans: list[str]) -> str:
+    """Correction prompt for the single automatic retry after a failed verification."""
+    moves = ", ".join(pv_sans) if pv_sans else "(none)"
+    return (
+        f"You just cited {', '.join(bad_moves)} — none of these appear in ENGINE_PVS "
+        f"and they are not legal here. Correct your answer now using only these "
+        f"engine moves: {moves}. Do not mention the wrong moves again."
+    )

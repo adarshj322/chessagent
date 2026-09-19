@@ -3,9 +3,9 @@ import { Chess, type Square } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import ReactMarkdown from 'react-markdown';
 import { analyzePosition, evalBarPct, type AnalyzeResponse } from './lib/api';
-import { buildSystemPrompt, buildUserPrompt } from './lib/prompt';
-import { explainStream, fetchModels, loadKey, saveKey, MODEL_STORE, EFFORT_STORE, type ReasoningEffort } from './lib/openrouter';
-import { verifyExplanation } from './lib/verify';
+import { buildSystemPrompt, buildUserPrompt, buildChatSystemPrompt, buildFollowupReminder, buildCorrectionPrompt } from './lib/prompt';
+import { chatStream, explainStream, fetchModels, loadKey, saveKey, MODEL_STORE, EFFORT_STORE, type ReasoningEffort, type ChatMessage } from './lib/openrouter';
+import { verifyExplanation, type TieredVerification } from './lib/verify';
 
 const STARTPOS = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
@@ -52,6 +52,12 @@ export default function App() {
   const [explanation, setExplanation] = useState('');
   const [explaining, setExplaining] = useState(false);
 
+  // Follow-up chat about the analyzed position (grounded + verified per reply).
+  interface ChatMsg { role: 'user' | 'assistant'; text: string; corrected?: boolean }
+  const [chat, setChat] = useState<ChatMsg[]>([]);
+  const [followup, setFollowup] = useState('');
+  const [chatting, setChatting] = useState(false);
+
   useEffect(() => {
     setSelPv(0);
     setPly(0);
@@ -89,6 +95,18 @@ export default function App() {
     );
   }, [explanation, engine]);
 
+  // Per-reply verification for follow-up chat answers.
+  const chatChecks = useMemo(() => {
+    const m = new Map<number, TieredVerification>();
+    if (!engine) return m;
+    const pvSans = engine.pv_lines.map((p) => p.san);
+    const pvSeqs = engine.pv_lines.map((p) => p.pv_san);
+    chat.forEach((msg, i) => {
+      if (msg.role === 'assistant' && msg.text) m.set(i, verifyExplanation(msg.text, pvSans, engine.fen, pvSeqs));
+    });
+    return m;
+  }, [chat, engine]);
+
   const arrows = useMemo(() => {
     if (!engine || ply !== 0) return [];
     const out: [Square, Square, string?][] = [];
@@ -104,6 +122,7 @@ export default function App() {
   function resetAnalysis() {
     setEngine(null);
     setExplanation('');
+    setChat([]);
     setPly(0);
   }
 
@@ -157,6 +176,7 @@ export default function App() {
     setExplaining(true);
     setError('');
     setExplanation('');
+    setChat([]);
     localStorage.setItem(MODEL_STORE, model);
     localStorage.setItem(EFFORT_STORE, effort);
     try {
@@ -171,6 +191,84 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setExplaining(false);
+    }
+  }
+
+  async function onSendFollowup() {
+    const q = followup.trim();
+    if (!q || chatting || explaining) return;
+    if (!engine || !explanation) {
+      setError('Run Analyze + Explain with LLM first, then ask follow-ups.');
+      return;
+    }
+    if (!apiKey) {
+      setError('Enter your OpenRouter API key first (stored only in this browser).');
+      return;
+    }
+    setFollowup('');
+    setChatting(true);
+    setError('');
+
+    const pvSans = engine.pv_lines.map((p) => p.san);
+    const pvSeqs = engine.pv_lines.map((p) => p.pv_san);
+    const reminder = buildFollowupReminder(pvSans, engine.explanation?.verdict ?? '');
+    const history: ChatMsg[] = [...chat, { role: 'user', text: q }];
+    setChat(history);
+
+    // Bound token growth: full grounding + first explanation always present,
+    // plus only the last 3 turns of back-and-forth.
+    const base: ChatMessage[] = [
+      { role: 'system', content: buildChatSystemPrompt(rating) },
+      { role: 'user', content: buildUserPrompt(fen, engine.pv_lines, engine.depth_reached, rating, engine.eval_cp, engine.mate, engine.explanation) },
+      { role: 'assistant', content: explanation }
+    ];
+    const recent = history.slice(-3);
+    const turns: ChatMessage[] = recent.map((m, i) =>
+      i === recent.length - 1 && m.role === 'user'
+        ? { role: 'user', content: m.text + reminder }
+        : { role: m.role, content: m.text }
+    );
+
+    // Placeholder assistant message, filled by the stream.
+    setChat((h) => [...h, { role: 'assistant', text: '' }]);
+    const setLast = (text: string, corrected = false) =>
+      setChat((h) => {
+        const c = [...h];
+        c[c.length - 1] = { role: 'assistant', text, corrected };
+        return c;
+      });
+
+    try {
+      let acc = '';
+      await chatStream(apiKey, model, [...base, ...turns], (t) => {
+        acc += t;
+        setLast(acc);
+      }, { effort });
+      // Verify the reply; on hallucination, auto-correct exactly once.
+      const v = verifyExplanation(acc, pvSans, engine.fen, pvSeqs);
+      if (acc && v.hallucinated.length > 0) {
+        const fix: ChatMessage = { role: 'user', content: buildCorrectionPrompt(v.hallucinated, pvSans) };
+        acc = '';
+        setLast('', true);
+        await chatStream(
+          apiKey, model,
+          [...base, ...turns, { role: 'assistant', content: '(withdrawing my previous answer: it cited moves outside the engine lines)' }, fix],
+          (t) => {
+            acc += t;
+            setLast(acc, true);
+          },
+          { effort }
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setChat((h) => {
+        const c = [...h];
+        if (c.length && c[c.length - 1].role === 'assistant' && !c[c.length - 1].text) c.pop();
+        return c;
+      });
+    } finally {
+      setChatting(false);
     }
   }
 
@@ -194,6 +292,8 @@ export default function App() {
               onPieceDrop={onDrop}
               boardOrientation={orientation}
               customArrows={arrows}
+              showBoardNotation
+              customNotationStyle={{ fontSize: '14px', fontWeight: 700 }}
               boardWidth={Math.min(440, window.innerWidth - 60)}
             />
             <div className="row" style={{ marginTop: 8 }}>
@@ -336,6 +436,42 @@ export default function App() {
             {verification && verification.hallucinated.length === 0 && verification.legalOther.length === 0 && verification.engineMoves.length > 0 && (
               <div className="warn" style={{ background: '#e8f5e9', borderColor: '#a5d6a7' }}>All cited moves verified against engine lines: <span className="mono">{verification.engineMoves.join(', ')}</span></div>
             )}
+            <div className="chat">
+              <h4>Follow-up questions</h4>
+              {!explanation && <p style={{ opacity: 0.7, fontSize: 13 }}>Run <strong>Explain with LLM</strong> first — then ask anything about this position. Every answer re-checks the engine lines and gets its own verification badge.</p>}
+              {explanation && chat.length === 0 && <p style={{ opacity: 0.7, fontSize: 13 }}>Ask anything about this position — e.g. “Why not the other capture?” Every answer is re-grounded and verified.</p>}
+              {chat.length > 0 && (
+                <div className="chat-thread">
+                  {chat.map((m, i) => (
+                    <div key={i} className={m.role === 'user' ? 'bubble-user' : 'bubble-assistant'}>
+                      {m.role === 'assistant' ? <ReactMarkdown>{m.text || '…'}</ReactMarkdown> : m.text}
+                      {m.role === 'assistant' && m.text && (() => {
+                        const v = chatChecks.get(i);
+                        if (!v) return null;
+                        if (v.hallucinated.length > 0) return <div className="warn small">Unverified moves — treat with caution: <span className="mono">{v.hallucinated.join(', ')}</span>{m.corrected ? ' (auto-correction attempted)' : ''}</div>;
+                        if (v.legalOther.length > 0) return <div className="warn amber small">Legal but not engine lines: <span className="mono">{v.legalOther.join(', ')}</span></div>;
+                        if (v.engineMoves.length > 0) return <div className="ok small">Verified: <span className="mono">{v.engineMoves.join(', ')}</span>{m.corrected ? ' (auto-corrected)' : ''}</div>;
+                        return null;
+                      })()}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {explanation && (
+                <div className="row" style={{ marginTop: 8 }}>
+                  <input
+                    value={followup}
+                    onChange={(e) => setFollowup(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') onSendFollowup(); }}
+                    placeholder="Ask a follow-up about this position…"
+                    style={{ flex: 1, minWidth: 200 }}
+                    disabled={chatting || explaining}
+                  />
+                  <button className="primary" disabled={chatting || explaining || !followup.trim()} onClick={onSendFollowup}>{chatting ? 'Thinking…' : 'Ask'}</button>
+                  {chat.length > 0 && <button onClick={() => setChat([])} disabled={chatting}>Clear</button>}
+                </div>
+              )}
+            </div>
           </div>
           {error && <div className="err">{error}</div>}
           <div className="card">

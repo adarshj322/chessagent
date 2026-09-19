@@ -31,6 +31,31 @@ export async function explainStream(
   onToken: (t: string) => void,
   opts: { effort?: ReasoningEffort } = {}
 ): Promise<void> {
+  return chatStream(
+    apiKey,
+    model,
+    [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ],
+    onToken,
+    opts
+  );
+}
+
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+/** Multi-turn streaming chat (used for follow-up questions). */
+export async function chatStream(
+  apiKey: string,
+  model: string,
+  messages: ChatMessage[],
+  onToken: (t: string) => void,
+  opts: { effort?: ReasoningEffort } = {}
+): Promise<void> {
   // OpenRouter normalizes reasoning controls across providers:
   // https://openrouter.ai/docs/use-cases/reasoning-tokens
   // Models that don't support `effort` simply ignore it.
@@ -40,10 +65,7 @@ export async function explainStream(
     model,
     stream: true,
     temperature: 0.2,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user }
-    ]
+    messages
   };
   if (opts.effort) body.reasoning = { effort: opts.effort };
   const res = await fetch(OPENROUTER_URL, {

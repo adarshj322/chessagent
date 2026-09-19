@@ -27,3 +27,6 @@ proxies `/api` same-origin).
 5. **Explain with LLM** → streams a rating-aware rephrasing of the verified facts; cited moves get a
    3-tier badge: engine line (green) / legal-but-not-recommended (amber) / hallucinated (red)
    (`src/lib/verify.ts`).
+6. Ask **follow-ups** in the chat thread — every question re-sends the engine facts with a grounding
+   reminder, each answer gets its own badge, and a hallucinated reply triggers one automatic correction
+   retry. History is trimmed (grounding + first explanation + last 3 turns) to bound token use.

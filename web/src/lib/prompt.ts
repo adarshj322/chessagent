@@ -7,8 +7,7 @@ export interface WhyPayload {
   alternatives: { san?: string | null; why?: string | null }[];
 }
 
-export function buildSystemPrompt(rating = 1200): string {
-  const level = rating < 1000 ? 'beginner' : rating < 1600 ? 'intermediate' : 'advanced';
+export function buildSystemPrompt(rating = 1200): string {  const level = rating < 1000 ? 'beginner' : rating < 1600 ? 'intermediate' : 'advanced';
   return (
     `You are a chess coach explaining a Stockfish analysis to a ${level} player (rating ~${rating}).\n` +
     'You are given VERIFIED_FACTS computed by a chess engine from the real board. ' +
@@ -63,5 +62,38 @@ export function buildUserPrompt(
     facts +
     `Student rating: ~${rating}\n` +
     'Explain the best move (PV1) vs PV2/PV3, following VERIFIED_FACTS.'
+  );
+}
+
+/** System prompt for follow-up chat: same grounding, plus multi-turn rules. */
+export function buildChatSystemPrompt(rating = 1200): string {
+  return (
+    buildSystemPrompt(rating) +
+    '\nFOLLOW-UP RULES:\n' +
+    '6. This is a continuing conversation about ONE position. Every reply must still obey rules 1-4.\n' +
+    '7. If asked about a different position or general theory, answer briefly (max 3 sentences) and steer back to this position.\n' +
+    '8. Never carry a move mentioned by the student into your answer as if the engine recommended it — only ENGINE_PVS moves count.'
+  );
+}
+
+/**
+ * Short grounding nudge appended to every follow-up question. The full
+ * ENGINE_PVS + VERIFIED_FACTS already sit earlier in the history; this keeps
+ * them salient so long chats don't drift into hallucination.
+ */
+export function buildFollowupReminder(pvSans: string[], verdict: string): string {
+  const moves = pvSans.length ? pvSans.join(', ') : '(none)';
+  return (
+    `\n[Grounding reminder — still true for this position. ` +
+    `Verdict: ${verdict} Moves you may cite: ${moves}. Only cite these.]`
+  );
+}
+
+/** Correction prompt used for the single automatic retry after a failed verification. */
+export function buildCorrectionPrompt(badMoves: string[], pvSans: string[]): string {
+  const moves = pvSans.length ? pvSans.join(', ') : '(none)';
+  return (
+    `You just cited ${badMoves.join(', ')} — none of these appear in ENGINE_PVS and they are not legal here. ` +
+    `Correct your answer now using only these engine moves: ${moves}. Do not mention the wrong moves again.`
   );
 }
