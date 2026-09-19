@@ -106,9 +106,9 @@ def build_chat_system_prompt(rating: int = 1200) -> str:
     return (
         build_system_prompt(rating)
         + "\nFOLLOW-UP RULES:\n"
-        + "6. This is a continuing conversation about ONE position. Every reply must still obey rules 1-4.\n"
-        + "7. If asked about a different position or general theory, answer briefly (max 3 sentences) and steer back to this position.\n"
-        + "8. Never carry a move mentioned by the student into your answer as if the engine recommended it — only ENGINE_PVS moves count."
+        + "5. This is a continuing conversation about ONE position. Every reply must still obey rules 1-4.\n"
+        + "6. If asked about a different position or general theory, answer briefly (max 3 sentences) and steer back to this position.\n"
+        + "7. Never carry a move mentioned by the student into your answer as if the engine recommended it — only ENGINE_PVS moves count."
     )
 
 

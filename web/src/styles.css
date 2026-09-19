@@ -25,8 +25,8 @@ ul.why li { margin-bottom: 6px; }
 .chat { margin-top: 12px; border-top: 1px solid #ddd; padding-top: 8px; }
 .chat h4 { margin: 8px 0 4px; }
 .chat-thread { display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow-y: auto; margin: 8px 0; }
-.bubble-user { align-self: flex-end; background: #e8f0fe; border-radius: 12px 12px 4px 12px; padding: 8px 12px; max-width: 90%; font-size: 14px; }
-.bubble-assistant { align-self: flex-start; background: #f5f5f5; border: 1px solid #ddd; border-radius: 12px 12px 12px 4px; padding: 8px 12px; max-width: 100%; font-size: 14px; }
+.bubble-user { align-self: flex-end; background: #e8f0fe; border-radius: 12px 12px 4px 12px; padding: 8px 12px; max-width: 90%; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.bubble-assistant { align-self: flex-start; background: #f5f5f5; border: 1px solid #ddd; border-radius: 12px 12px 12px 4px; padding: 8px 12px; max-width: 100%; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
 .bubble-assistant p { margin: 6px 0; }
 .ok { background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 8px; padding: 8px 10px; margin-top: 8px; }
 .warn.amber { background: #fff8e1; }

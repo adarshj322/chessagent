@@ -54,7 +54,7 @@ export async function chatStream(
   model: string,
   messages: ChatMessage[],
   onToken: (t: string) => void,
-  opts: { effort?: ReasoningEffort } = {}
+  opts: { effort?: ReasoningEffort; signal?: AbortSignal } = {}
 ): Promise<void> {
   // OpenRouter normalizes reasoning controls across providers:
   // https://openrouter.ai/docs/use-cases/reasoning-tokens
@@ -70,6 +70,7 @@ export async function chatStream(
   if (opts.effort) body.reasoning = { effort: opts.effort };
   const res = await fetch(OPENROUTER_URL, {
     method: 'POST',
+    signal: opts.signal,
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,

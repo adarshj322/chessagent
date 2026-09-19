@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Chess, type Square } from 'chess.js';
 import { Chessboard } from 'react-chessboard';
 import ReactMarkdown from 'react-markdown';
@@ -31,6 +31,24 @@ function uciSquares(uci: string): [Square, Square] | null {
   return [uci.slice(0, 2) as Square, uci.slice(2, 4) as Square];
 }
 
+interface ChatMsg { role: 'user' | 'assistant'; text: string; corrected?: boolean; id: number }
+
+// Hoisted: inline literals here re-render the board canvas every render.
+const NOTATION_STYLE = { fontSize: '14px', fontWeight: 700 } as const;
+
+const MAX_QUESTION_CHARS = 1000;
+
+function renderChatBadge(msg: ChatMsg, v: TieredVerification | undefined) {
+  if (msg.role !== 'assistant' || !msg.text || !v) return null;
+  if (v.hallucinated.length > 0)
+    return <div className="warn small">Unverified moves — treat with caution: <span className="mono">{v.hallucinated.join(', ')}</span>{msg.corrected ? ' (auto-correction attempted)' : ''}</div>;
+  if (v.legalOther.length > 0)
+    return <div className="warn amber small">Legal but not engine lines: <span className="mono">{v.legalOther.join(', ')}</span></div>;
+  if (v.engineMoves.length > 0)
+    return <div className="ok small">Verified: <span className="mono">{v.engineMoves.join(', ')}</span>{msg.corrected ? ' (auto-corrected)' : ''}</div>;
+  return null;
+}
+
 export default function App() {
   const [fen, setFen] = useState(STARTPOS);
   const [depth, setDepth] = useState(22);
@@ -53,10 +71,20 @@ export default function App() {
   const [explaining, setExplaining] = useState(false);
 
   // Follow-up chat about the analyzed position (grounded + verified per reply).
-  interface ChatMsg { role: 'user' | 'assistant'; text: string; corrected?: boolean }
   const [chat, setChat] = useState<ChatMsg[]>([]);
   const [followup, setFollowup] = useState('');
   const [chatting, setChatting] = useState(false);
+  // Sync guards (state updates are async): request id invalidates stale
+  // streams, chattingRef blocks double-submit, abortRef cancels flights.
+  const reqIdRef = useRef(0);
+  const chattingRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  const idRef = useRef(0);
+  const chatCacheRef = useRef(new Map<number, { text: string; value: TieredVerification }>());
+  const nextId = () => ++idRef.current;
+
+  // Abort any in-flight chat if the component unmounts.
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   useEffect(() => {
     setSelPv(0);
@@ -95,17 +123,30 @@ export default function App() {
     );
   }, [explanation, engine]);
 
-  // Per-reply verification for follow-up chat answers.
+  // Per-reply verification for follow-up chat answers. Cached by message id
+  // and skips the in-flight reply so streaming tokens don't re-verify everything.
   const chatChecks = useMemo(() => {
     const m = new Map<number, TieredVerification>();
-    if (!engine) return m;
+    if (!engine) {
+      chatCacheRef.current.clear();
+      return m;
+    }
     const pvSans = engine.pv_lines.map((p) => p.san);
     const pvSeqs = engine.pv_lines.map((p) => p.pv_san);
     chat.forEach((msg, i) => {
-      if (msg.role === 'assistant' && msg.text) m.set(i, verifyExplanation(msg.text, pvSans, engine.fen, pvSeqs));
+      if (msg.role !== 'assistant' || !msg.text) return;
+      if (i === chat.length - 1 && chatting) return; // still streaming
+      const prev = chatCacheRef.current.get(msg.id);
+      if (prev && prev.text === msg.text) {
+        m.set(i, prev.value);
+        return;
+      }
+      const v = verifyExplanation(msg.text, pvSans, engine.fen, pvSeqs);
+      chatCacheRef.current.set(msg.id, { text: msg.text, value: v });
+      m.set(i, v);
     });
     return m;
-  }, [chat, engine]);
+  }, [chat, engine, chatting]);
 
   const arrows = useMemo(() => {
     if (!engine || ply !== 0) return [];
@@ -120,6 +161,9 @@ export default function App() {
   }, [engine, ply]);
 
   function resetAnalysis() {
+    reqIdRef.current++; // invalidate any in-flight chat stream
+    abortRef.current?.abort();
+    abortRef.current = null;
     setEngine(null);
     setExplanation('');
     setChat([]);
@@ -177,6 +221,9 @@ export default function App() {
     setError('');
     setExplanation('');
     setChat([]);
+    reqIdRef.current++; // invalidate any in-flight chat stream
+    abortRef.current?.abort();
+    abortRef.current = null;
     localStorage.setItem(MODEL_STORE, model);
     localStorage.setItem(EFFORT_STORE, effort);
     try {
@@ -195,8 +242,8 @@ export default function App() {
   }
 
   async function onSendFollowup() {
-    const q = followup.trim();
-    if (!q || chatting || explaining) return;
+    const q = followup.trim().slice(0, MAX_QUESTION_CHARS);
+    if (!q || chattingRef.current || explaining) return;
     if (!engine || !explanation) {
       setError('Run Analyze + Explain with LLM first, then ask follow-ups.');
       return;
@@ -205,6 +252,12 @@ export default function App() {
       setError('Enter your OpenRouter API key first (stored only in this browser).');
       return;
     }
+    chattingRef.current = true;
+    const reqId = ++reqIdRef.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const live = () => reqId === reqIdRef.current;
     setFollowup('');
     setChatting(true);
     setError('');
@@ -212,17 +265,19 @@ export default function App() {
     const pvSans = engine.pv_lines.map((p) => p.san);
     const pvSeqs = engine.pv_lines.map((p) => p.pv_san);
     const reminder = buildFollowupReminder(pvSans, engine.explanation?.verdict ?? '');
-    const history: ChatMsg[] = [...chat, { role: 'user', text: q }];
+    const history: ChatMsg[] = [...chat, { role: 'user', text: q, id: nextId() }];
     setChat(history);
 
     // Bound token growth: full grounding + first explanation always present,
-    // plus only the last 3 turns of back-and-forth.
+    // plus only the last 3 turns (6 messages) of back-and-forth.
+    // NOTE: grounding always uses engine.fen — the analyzed position — never
+    // the possibly-edited fen input (Ask is disabled while they differ).
     const base: ChatMessage[] = [
       { role: 'system', content: buildChatSystemPrompt(rating) },
-      { role: 'user', content: buildUserPrompt(fen, engine.pv_lines, engine.depth_reached, rating, engine.eval_cp, engine.mate, engine.explanation) },
+      { role: 'user', content: buildUserPrompt(engine.fen, engine.pv_lines, engine.depth_reached, rating, engine.eval_cp, engine.mate, engine.explanation) },
       { role: 'assistant', content: explanation }
     ];
-    const recent = history.slice(-3);
+    const recent = history.slice(-6);
     const turns: ChatMessage[] = recent.map((m, i) =>
       i === recent.length - 1 && m.role === 'user'
         ? { role: 'user', content: m.text + reminder }
@@ -230,11 +285,24 @@ export default function App() {
     );
 
     // Placeholder assistant message, filled by the stream.
-    setChat((h) => [...h, { role: 'assistant', text: '' }]);
+    const placeholderId = nextId();
+    setChat((h) => [...h, { role: 'assistant', text: '', id: placeholderId }]);
     const setLast = (text: string, corrected = false) =>
       setChat((h) => {
+        if (!live()) return h;
+        if (!h.length || h[h.length - 1].role !== 'assistant') return h;
         const c = [...h];
-        c[c.length - 1] = { role: 'assistant', text, corrected };
+        c[c.length - 1] = { ...c[c.length - 1], text, corrected };
+        return c;
+      });
+    const dropOrMarkLast = () =>
+      setChat((h) => {
+        if (!live()) return h;
+        const c = [...h];
+        const last = c[c.length - 1];
+        if (!last || last.role !== 'assistant') return h;
+        if (!last.text) c.pop();
+        else c[c.length - 1] = { ...last, text: last.text + '\n\n*(Reply interrupted — incomplete.)*' };
         return c;
       });
 
@@ -243,7 +311,7 @@ export default function App() {
       await chatStream(apiKey, model, [...base, ...turns], (t) => {
         acc += t;
         setLast(acc);
-      }, { effort });
+      }, { effort, signal: controller.signal });
       // Verify the reply; on hallucination, auto-correct exactly once.
       const v = verifyExplanation(acc, pvSans, engine.fen, pvSeqs);
       if (acc && v.hallucinated.length > 0) {
@@ -257,20 +325,28 @@ export default function App() {
             acc += t;
             setLast(acc, true);
           },
-          { effort }
+          { effort, signal: controller.signal }
         );
       }
     } catch (e) {
+      if (!live()) return; // superseded by Reset / new analysis — state already cleared
+      if (e instanceof DOMException && e.name === 'AbortError') {
+        dropOrMarkLast();
+        return;
+      }
       setError(e instanceof Error ? e.message : String(e));
-      setChat((h) => {
-        const c = [...h];
-        if (c.length && c[c.length - 1].role === 'assistant' && !c[c.length - 1].text) c.pop();
-        return c;
-      });
+      dropOrMarkLast();
     } finally {
-      setChatting(false);
+      if (live()) {
+        chattingRef.current = false;
+        setChatting(false);
+      }
     }
   }
+
+  // True while the FEN input differs from the analyzed position: grounding
+  // would be stale, so follow-ups stay disabled until re-analysis.
+  const fenDirty = !!engine && fen !== engine.fen;
 
   const barPct = engine ? evalBarPct(engine.eval_cp, engine.mate, engine.win_pct) : 50;
   const why = engine?.explanation ?? null;
@@ -293,7 +369,7 @@ export default function App() {
               boardOrientation={orientation}
               customArrows={arrows}
               showBoardNotation
-              customNotationStyle={{ fontSize: '14px', fontWeight: 700 }}
+              customNotationStyle={NOTATION_STYLE}
               boardWidth={Math.min(440, window.innerWidth - 60)}
             />
             <div className="row" style={{ marginTop: 8 }}>
@@ -443,16 +519,9 @@ export default function App() {
               {chat.length > 0 && (
                 <div className="chat-thread">
                   {chat.map((m, i) => (
-                    <div key={i} className={m.role === 'user' ? 'bubble-user' : 'bubble-assistant'}>
+                    <div key={m.id} className={m.role === 'user' ? 'bubble-user' : 'bubble-assistant'}>
                       {m.role === 'assistant' ? <ReactMarkdown>{m.text || '…'}</ReactMarkdown> : m.text}
-                      {m.role === 'assistant' && m.text && (() => {
-                        const v = chatChecks.get(i);
-                        if (!v) return null;
-                        if (v.hallucinated.length > 0) return <div className="warn small">Unverified moves — treat with caution: <span className="mono">{v.hallucinated.join(', ')}</span>{m.corrected ? ' (auto-correction attempted)' : ''}</div>;
-                        if (v.legalOther.length > 0) return <div className="warn amber small">Legal but not engine lines: <span className="mono">{v.legalOther.join(', ')}</span></div>;
-                        if (v.engineMoves.length > 0) return <div className="ok small">Verified: <span className="mono">{v.engineMoves.join(', ')}</span>{m.corrected ? ' (auto-corrected)' : ''}</div>;
-                        return null;
-                      })()}
+                      {renderChatBadge(m, chatChecks.get(i))}
                     </div>
                   ))}
                 </div>
@@ -465,11 +534,14 @@ export default function App() {
                     onKeyDown={(e) => { if (e.key === 'Enter') onSendFollowup(); }}
                     placeholder="Ask a follow-up about this position…"
                     style={{ flex: 1, minWidth: 200 }}
-                    disabled={chatting || explaining}
+                    disabled={chatting || explaining || fenDirty}
                   />
-                  <button className="primary" disabled={chatting || explaining || !followup.trim()} onClick={onSendFollowup}>{chatting ? 'Thinking…' : 'Ask'}</button>
+                  <button className="primary" disabled={chatting || explaining || fenDirty || !followup.trim()} onClick={onSendFollowup}>{chatting ? 'Thinking…' : 'Ask'}</button>
                   {chat.length > 0 && <button onClick={() => setChat([])} disabled={chatting}>Clear</button>}
                 </div>
+              )}
+              {explanation && fenDirty && (
+                <p style={{ opacity: 0.75, fontSize: 13 }}>Position edited since analysis — press <strong>Analyze</strong> again to refresh the grounding before asking.</p>
               )}
             </div>
           </div>

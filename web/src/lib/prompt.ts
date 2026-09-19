@@ -7,7 +7,8 @@ export interface WhyPayload {
   alternatives: { san?: string | null; why?: string | null }[];
 }
 
-export function buildSystemPrompt(rating = 1200): string {  const level = rating < 1000 ? 'beginner' : rating < 1600 ? 'intermediate' : 'advanced';
+export function buildSystemPrompt(rating = 1200): string {
+  const level = rating < 1000 ? 'beginner' : rating < 1600 ? 'intermediate' : 'advanced';
   return (
     `You are a chess coach explaining a Stockfish analysis to a ${level} player (rating ~${rating}).\n` +
     'You are given VERIFIED_FACTS computed by a chess engine from the real board. ' +
@@ -70,9 +71,9 @@ export function buildChatSystemPrompt(rating = 1200): string {
   return (
     buildSystemPrompt(rating) +
     '\nFOLLOW-UP RULES:\n' +
-    '6. This is a continuing conversation about ONE position. Every reply must still obey rules 1-4.\n' +
-    '7. If asked about a different position or general theory, answer briefly (max 3 sentences) and steer back to this position.\n' +
-    '8. Never carry a move mentioned by the student into your answer as if the engine recommended it — only ENGINE_PVS moves count.'
+    '5. This is a continuing conversation about ONE position. Every reply must still obey rules 1-4.\n' +
+    '6. If asked about a different position or general theory, answer briefly (max 3 sentences) and steer back to this position.\n' +
+    '7. Never carry a move mentioned by the student into your answer as if the engine recommended it — only ENGINE_PVS moves count.'
   );
 }
 
